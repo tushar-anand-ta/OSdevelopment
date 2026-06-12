@@ -76,7 +76,9 @@ start:
 	mov [bdb_sectors_per_track], cx		;sector count
 
 	inc dh
-	mov [bdb_heads], dh					;head count
+	xor ch, ch
+	mov cl, dh
+	mov [bdb_heads], cx					;head count
 
 	;Compute LBA of root directory = reserved + fat * sectors_per_fat
 	;this section can be hardcoded
@@ -173,7 +175,7 @@ start:
 	jz .even
 
 .odd:
-	shr bx, 4
+	shr ax, 4
 	jmp .next_cluster_after
 
 .even:
@@ -368,4 +370,6 @@ KERNEL_LOAD_OFFSET:		equ 0
 times 510-($-$$) db 0
 dw 0xAA55
 
+; Buffer starts at 0x7E00 (right after the bootloader)
+; Make sure your kernel doesn't load into this space!
 buffer:

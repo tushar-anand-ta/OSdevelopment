@@ -26,8 +26,9 @@ typedef struct{
 
     //extended boot record
     uint8_t DriverNumber;
+    uint8_t _Reserved;
     uint8_t Signature;
-    uint16_t VolumeId; //serial number
+    uint32_t VolumeId; //serial number
     uint8_t VolumeLabel[11]; // 11bytes padded with spaces
     uint8_t SystemId[8]; // 8 bytes
 
@@ -68,6 +69,9 @@ bool readSectors(FILE* disk, uint32_t lba, uint32_t count, void* bufferOut){
 
 bool readFat(FILE* disk){
     g_fat = (uint8_t*)malloc(g_BootSector.SectorsPerFat*g_BootSector.BytesPerSector);
+    if(!g_fat){
+        return false;
+    }
     return readSectors(disk,g_BootSector.ReservedSectors,g_BootSector.SectorsPerFat,g_fat);
 }
 
@@ -81,6 +85,9 @@ bool readRootDirectory(FILE* disk){
 
     g_RootDirectoryEnd = lba + sectors;
     g_RootDirectory = (DirectoryEntry*)malloc(sectors * g_BootSector.BytesPerSector);
+    if(!g_RootDirectory){
+        return false;
+    }
     return readSectors(disk,lba,sectors,g_RootDirectory);
 }
 
@@ -124,21 +131,41 @@ DirectoryEntry* findFile(const char* name){
 bool readFile(DirectoryEntry* fileEntry, FILE* disk, uint8_t* outputBuffer){
     bool ok = true;
     uint16_t currentCluster = fileEntry -> FirstClusterLow;
+    uint32_t bytesRemaining = fileEntry -> Size;
+    uint32_t clusterSize = g_BootSector.SectorsPerCluster * g_BootSector.BytesPerSector;
+    uint32_t maxClusters = (g_BootSector.SectorsPerFat * g_BootSector.BytesPerSector) * 2/3;
+    if(bytesRemaining == 0){
+        return true;
+    }
 
     do{
+
+        if(currentCluster < 2 || currentCluster>=maxClusters ||currentCluster >= 0x0FF0){
+            break;
+        }
+
         uint32_t lba = g_RootDirectoryEnd + (currentCluster - 2)*g_BootSector.SectorsPerCluster;
         ok = ok && readSectors(disk,lba,g_BootSector.SectorsPerCluster,outputBuffer);
-        outputBuffer += g_BootSector.SectorsPerCluster * g_BootSector.BytesPerSector;
 
-        uint32_t fatIndex = currentCluster * 3/2;
-        if(currentCluster%2==0){
-            currentCluster = (*(uint16_t*)(g_fat + fatIndex)) & 0x0FFF;
+        outputBuffer += clusterSize;
+        if(bytesRemaining>clusterSize){
+            bytesRemaining -= clusterSize;
         }
         else{
-            currentCluster = (*(uint16_t*)(g_fat+fatIndex))>>4;
+            bytesRemaining = 0;
+        }
+
+        uint32_t fatIndex = currentCluster * 3/2;
+        uint16_t fatEntry = g_fat[fatIndex] | (g_fat[fatIndex+1] << 8);
+
+        if(currentCluster%2==0){
+            currentCluster = fatEntry & 0x0FFF;
+        }
+        else{
+            currentCluster = fatEntry >> 4;
         }
     }
-    while(ok && currentCluster<0x0FF8);
+    while(ok && currentCluster<0x0FF0 && bytesRemaining>0);
 
     return ok;
 }
@@ -187,14 +214,27 @@ int main(int argc, char** argv){
         return -5;
     }
 
-    uint8_t* buffer = (uint8_t*)malloc(fileEntry->Size+g_BootSector.BytesPerSector);
+    uint32_t clusterSize = g_BootSector.SectorsPerCluster * g_BootSector.BytesPerSector;
+    uint8_t* buffer = (uint8_t*)malloc(fileEntry->Size+clusterSize);
+
+    if(!buffer){
+        fprintf(stderr,"Memory allocation failed for file buffer!\n");
+        free(g_fat);
+        free(g_RootDirectory);
+        fclose(disk);
+        return -7;
+    }
+
+    
     if(!readFile(fileEntry, disk, buffer)){
         fprintf(stderr,"Could not read file %s!\n",argv[2]);
+        free(buffer);
         free(g_fat);
         free(g_RootDirectory);
         fclose(disk);
         return -6;
     }
+
 
     for(size_t i=0; i<fileEntry->Size;i++){
         if(isprint(buffer[i])){
